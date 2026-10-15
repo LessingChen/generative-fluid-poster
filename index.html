@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Generative Fluid</title>
+<!--
+  Design canvas is 786×1116.
+  public/poster-bg.png and public/poster-text.png are an approximate split of one
+  flattened 721×1024 JPEG. This is not a lossless plate separation. Replace those
+  two files at the same pixel size to drop in original background and text layers.
+-->
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #12141a;
+    overflow: hidden;
+  }
+  #fit {
+    height: 100%;
+    display: grid;
+    place-items: center;
+    padding: max(48px, env(safe-area-inset-top)) max(48px, env(safe-area-inset-right)) max(48px, env(safe-area-inset-bottom)) max(48px, env(safe-area-inset-left));
+  }
+  #sizer {
+    aspect-ratio: 786 / 1116;
+    width: min(calc(100vw - 128px), calc((100vh - 128px) * 786 / 1116));
+    position: relative;
+  }
+  #stage {
+    position: absolute;
+    inset: 0;
+    overflow: visible;
+    isolation: isolate;
+    background: #0c3dff;
+    user-select: none;
+  }
+  .fill {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  img.fill {
+    object-fit: fill;
+    -webkit-user-drag: none;
+  }
+  .masked {
+    -webkit-mask-image: url("public/mask-color.png");
+    mask-image: url("public/mask-color.png");
+    -webkit-mask-size: 100% 100%;
+    mask-size: 100% 100%;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+  }
+  #veilWrap { mix-blend-mode: screen; opacity: 0.78; }
+  #pulse { mix-blend-mode: screen; }
+  #grain {
+    mix-blend-mode: overlay;
+    opacity: 0.22;
+    pointer-events: none;
+  }
+  #traces { pointer-events: none; }
+  #optic { pointer-events: none; overflow: visible; }
+  .quad {
+    position: absolute;
+    width: 50%;
+    height: 50%;
+    overflow: visible;
+    pointer-events: none;
+  }
+  .quad.tl { left: 0; top: 0; clip-path: inset(-22% 0 0 -22%); }
+  .quad.tr { left: 50%; top: 0; clip-path: inset(-22% -22% 0 0); }
+  .quad.bl { left: 0; top: 50%; clip-path: inset(0 0 -22% -22%); }
+  .quad.br { left: 50%; top: 50%; clip-path: inset(0 -22% -22% 0); }
+  .plate {
+    position: absolute;
+    width: 200%;
+    height: 200%;
+    transform-origin: 50% 50%;
+    will-change: transform;
+  }
+  .quad.tl .plate { left: 0; top: 0; }
+  .quad.tr .plate { left: -100%; top: 0; }
+  .quad.bl .plate { left: 0; top: -100%; }
+  .quad.br .plate { left: -100%; top: -100%; }
+  .plate img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+    -webkit-user-drag: none;
+    pointer-events: none;
+  }
+  .letters { z-index: 8; }
+  #bg { z-index: 0; }
+  #fs {
+    position: fixed;
+    top: 14px;
+    right: 14px;
+    z-index: 20;
+    width: 38px;
+    height: 38px;
+    border: 0;
+    padding: 0;
+    border-radius: 999px;
+    background: rgba(18, 20, 26, 0.72);
+    color: rgba(255, 255, 255, 0.82);
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+  }
+  #fs:hover { background: rgba(40, 46, 58, 0.9); }
+  #fs svg { width: 16px; height: 16px; display: block; }
+  @media (prefers-reduced-motion: reduce) {
+    .fx { display: none !important; }
+    .plate { transform: none !important; }
+  }
+</style>
+</head>
+<body>
+<button id="fs" type="button" aria-label="全屏显示">
+  <svg id="fsIcon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+    <path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/>
+  </svg>
+</button>
+<div id="fit">
+  <div id="sizer">
+    <div id="stage">
+      <img id="bg" class="fill" src="public/poster-bg.png" alt="" draggable="false" />
+      <div class="quad tl"><div class="plate bgplate"><img src="public/poster-bg.png" alt="" draggable="false"></div></div>
+      <div class="quad tr"><div class="plate bgplate"><img src="public/poster-bg.png" alt="" draggable="false"></div></div>
+      <div class="quad bl"><div class="plate bgplate"><img src="public/poster-bg.png" alt="" draggable="false"></div></div>
+      <div class="quad br"><div class="plate bgplate"><img src="public/poster-bg.png" alt="" draggable="false"></div></div>
+
+      <div id="veilWrap" class="fx fill masked">
+        <svg class="fill" viewBox="0 0 786 1116" preserveAspectRatio="xMidYMid meet">
+          <defs>
+            <filter id="veilFluid" x="-18%" y="-18%" width="136%" height="136%" color-interpolation-filters="sRGB">
+              <feGaussianBlur in="SourceGraphic" stdDeviation="8" result="soft"/>
+              <feTurbulence type="fractalNoise" baseFrequency="0.012 0.008" numOctaves="2" seed="5" result="noise"/>
+              <feOffset id="veilNudge" in="noise" dx="0" dy="0" result="nudge"/>
+              <feDisplacementMap id="veilDisp" in="soft" in2="nudge" scale="18" xChannelSelector="R" yChannelSelector="G"/>
+            </filter>
+            <radialGradient id="gTLa" cx="42%" cy="40%" r="52%">
+              <stop offset="0%" stop-color="#e7f7ff" stop-opacity="0.95"/>
+              <stop offset="38%" stop-color="#4c92ff" stop-opacity="0.55"/>
+              <stop offset="100%" stop-color="#1234ee" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="gTLb" cx="60%" cy="55%" r="50%">
+              <stop offset="0%" stop-color="#9fd6ff" stop-opacity="0.8"/>
+              <stop offset="100%" stop-color="#1a3cff" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="gTRa" cx="58%" cy="36%" r="54%">
+              <stop offset="0%" stop-color="#f4fffd" stop-opacity="0.75"/>
+              <stop offset="40%" stop-color="#7dffe4" stop-opacity="0.5"/>
+              <stop offset="100%" stop-color="#14f0b0" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="gTRb" cx="40%" cy="62%" r="48%">
+              <stop offset="0%" stop-color="#d8fff6" stop-opacity="0.7"/>
+              <stop offset="100%" stop-color="#0ad8c4" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="gBLa" cx="38%" cy="62%" r="54%">
+              <stop offset="0%" stop-color="#f3fffc" stop-opacity="0.7"/>
+              <stop offset="42%" stop-color="#5dffd4" stop-opacity="0.48"/>
+              <stop offset="100%" stop-color="#12e8b6" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="gBLb" cx="62%" cy="40%" r="46%">
+              <stop offset="0%" stop-color="#c8fff4" stop-opacity="0.65"/>
+              <stop offset="100%" stop-color="#0ec8b0" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="gBRa" cx="55%" cy="48%" r="52%">
+              <stop offset="0%" stop-color="#eef6ff" stop-opacity="0.9"/>
+              <stop offset="36%" stop-color="#3d86ff" stop-opacity="0.5"/>
+              <stop offset="100%" stop-color="#0c2fe8" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="gBRb" cx="35%" cy="70%" r="48%">
+              <stop offset="0%" stop-color="#b9dcff" stop-opacity="0.75"/>
+              <stop offset="100%" stop-color="#1840ff" stop-opacity="0"/>
+            </radialGradient>
+            <filter id="sheenGlow" x="-40%" y="-40%" width="180%" height="180%">
+              <feGaussianBlur stdDeviation="1.7"/>
+            </filter>
+            <linearGradient id="pulseGrad" gradientUnits="userSpaceOnUse" x1="0" y1="558" x2="786" y2="558">
+              <stop offset="0%" stop-color="#d9fff8" stop-opacity="0"/>
+              <stop offset="50%" stop-color="#f4fffd" stop-opacity="1"/>
+              <stop offset="100%" stop-color="#d9fff8" stop-opacity="0"/>
+            </linearGradient>
+            <linearGradient id="pulseGradV" gradientUnits="userSpaceOnUse" x1="400" y1="0" x2="400" y2="1116">
+              <stop offset="0%" stop-color="#d9fff8" stop-opacity="0"/>
+              <stop offset="50%" stop-color="#f4fffd" stop-opacity="1"/>
+              <stop offset="100%" stop-color="#d9fff8" stop-opacity="0"/>
+            </linearGradient>
+            <radialGradient id="pulseCore" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#ffffff" stop-opacity="0.95"/>
+              <stop offset="45%" stop-color="#c9fff4" stop-opacity="0.35"/>
+              <stop offset="100%" stop-color="#c9fff4" stop-opacity="0"/>
+            </radialGradient>
+          </defs>
+          <g filter="url(#veilFluid)">
+            <ellipse id="tlA" fill="url(#gTLa)" cx="200" cy="280" rx="250" ry="310"/>
+            <ellipse id="tlB" fill="url(#gTLb)" cx="250" cy="220" rx="130" ry="160"/>
+            <ellipse id="trA" fill="url(#gTRa)" cx="600" cy="230" rx="240" ry="280"/>
+            <ellipse id="trB" fill="url(#gTRb)" cx="540" cy="300" rx="120" ry="150"/>
+            <ellipse id="blA" fill="url(#gBLa)" cx="190" cy="860" rx="240" ry="290"/>
+            <ellipse id="blB" fill="url(#gBLb)" cx="250" cy="780" rx="120" ry="150"/>
+            <ellipse id="brA" fill="url(#gBRa)" cx="590" cy="860" rx="250" ry="300"/>
+            <ellipse id="brB" fill="url(#gBRb)" cx="520" cy="920" rx="130" ry="160"/>
+          </g>
+        </svg>
+      </div>
+
+      <canvas id="grain" class="fx fill masked" width="400" height="568"></canvas>
+      <canvas id="traces" class="fx fill"></canvas>
+
+      <svg id="optic" class="fx fill" viewBox="0 0 786 1116" preserveAspectRatio="xMidYMid meet">
+        <g id="rims" fill="none" stroke-linecap="round" stroke-linejoin="round"></g>
+        <g id="pulse" fill="none" stroke-linecap="round">
+          <line id="pulseH" x1="396" y1="558" x2="396" y2="558" stroke="url(#pulseGrad)" stroke-width="22"/>
+          <line id="pulseV" x1="400" y1="558" x2="400" y2="558" stroke="url(#pulseGradV)" stroke-width="22"/>
+          <circle id="pulseC" cx="398" cy="558" r="10" fill="url(#pulseCore)" stroke="none"/>
+        </g>
+      </svg>
+
+      <div class="quad tl letters"><div class="plate txplate"><img src="public/poster-text.png" alt="" draggable="false"></div></div>
+      <div class="quad tr letters"><div class="plate txplate"><img src="public/poster-text.png" alt="" draggable="false"></div></div>
+      <div class="quad bl letters"><div class="plate txplate"><img src="public/poster-text.png" alt="" draggable="false"></div></div>
+      <div class="quad br letters"><div class="plate txplate"><img src="public/poster-text.png" alt="" draggable="false"></div></div>
+    </div>
+  </div>
+</div>
+<script>
+const W = 786, H = 1116, LOOP = 10, TAU = Math.PI * 2;
+const CX = 398, CY = 558;
+const QUADS = [
+  { x: -3.1, y: -2.5, s: 0.042, r: -1.15, p: 0.35 },
+  { x: 3.4, y: -2.3, s: 0.048, r: 1.05, p: 1.85 },
+  { x: -2.7, y: 3.0, s: 0.044, r: 1.0, p: 3.25 },
+  { x: 3.2, y: 2.7, s: 0.05, r: -1.2, p: 4.75 }
+];
+const bgPlates = [...document.querySelectorAll(".bgplate")];
+const txPlates = [...document.querySelectorAll(".txplate")];
+
+function motionsAt(t) {
+  const u = (t / LOOP) * TAU;
+  return QUADS.map((m) => {
+    const a = 0.5 - 0.5 * Math.cos(u + m.p);
+    const wobble = Math.sin(u + m.p);
+    const tx = m.x * a;
+    const ty = m.y * a;
+    const scale = 1 + m.s * a;
+    const deg = m.r * wobble;
+    return {
+      tx: tx / 100,
+      ty: ty / 100,
+      scale,
+      rot: deg * Math.PI / 180,
+      css: `translate(${tx.toFixed(2)}%, ${ty.toFixed(2)}%) rotate(${deg.toFixed(2)}deg) scale(${scale.toFixed(4)})`
+    };
+  });
+}
+function warpWith(x, y, m) {
+  const dx = (x - CX) * m.scale;
+  const dy = (y - CY) * m.scale;
+  const c = Math.cos(m.rot);
+  const s = Math.sin(m.rot);
+  return [CX + dx * c - dy * s + m.tx * W, CY + dx * s + dy * c + m.ty * H];
+}
+
+const CONTOURS = [{"pts":[[354,561],[130,573],[82,577],[75,582],[75,596],[115,618],[143,637],[170,659],[210,698],[248,745],[283,799],[312,854],[334,906],[352,958]],"n":[[-0.0535,-0.9986],[-0.0587,-0.9983],[-0.1615,-0.9869],[-0.9383,-0.3457],[-0.669,0.7433],[-0.5163,0.8564],[-0.5977,0.8017],[-0.6732,0.7394],[-0.7407,0.6718],[-0.8105,0.5858],[-0.8623,0.5063],[-0.9027,0.4303],[-0.9333,0.359],[-0.945,0.3271]]},{"pts":[[369,561],[383,565],[388,570],[391,585],[391,600],[382,714],[380,786],[372,928],[370,951],[366,958]],"n":[[0.2747,-0.9615],[0.4281,-0.9037],[0.9285,-0.3714],[0.995,-0.0995],[0.9976,0.0696],[0.9983,0.059],[0.9989,0.0467],[0.9982,0.0605],[0.9806,0.1961],[0.8682,0.4961]]},{"pts":[[417,160],[413,165],[412,171],[409,248],[404,317],[402,399],[393,518],[394,548],[398,553],[409,557]],"n":[[-0.7809,-0.6247],[-0.9104,-0.4138],[-0.9988,-0.0481],[-0.9985,-0.0547],[-0.9989,-0.0463],[-0.9985,-0.0546],[-0.9986,-0.0536],[-0.9899,0.1414],[-0.5145,0.8575],[-0.3417,0.9398]]},{"pts":[[431,160],[456,229],[480,282],[502,322],[531,367],[565,410],[585,432],[609,455],[655,491],[687,511],[708,522],[708,536],[703,540],[691,542],[417,557]],"n":[[0.9402,-0.3406],[0.928,-0.3727],[0.8963,-0.4434],[0.8575,-0.5145],[0.8131,-0.5821],[0.7692,-0.639],[0.715,-0.6991],[0.6445,-0.7646],[0.5832,-0.8123],[0.5049,-0.8632],[0.7657,-0.6432],[0.9635,0.2676],[0.3328,0.943],[0.0593,0.9982],[0.0547,0.9985]]}];
+
+const FIELDS = [
+  [[70,90],[170,190],[270,340],[370,520]],
+  [[48,210],[160,280],[260,420],[360,540]],
+  [[500,70],[600,150],[690,250],[750,420]],
+  [[470,130],[580,220],[680,340],[740,500]],
+  [[70,680],[150,820],[230,960],[330,1060]],
+  [[40,760],[140,880],[250,990],[360,1088]],
+  [[470,640],[580,780],[680,930],[750,1060]],
+  [[440,720],[560,860],[670,980],[760,1090]]
+];
+const SEEDS = [
+  [[140,170],[280,380],[CX,CY],[570,760],[690,980]],
+  [[690,140],[540,330],[CX,CY],[230,790],[110,1020]],
+  [[150,960],[280,760],[CX,CY],[560,340],[710,150]],
+  [[650,1000],[520,780],[CX,CY],[250,340],[130,130]]
+];
+
+const reduceMQ = matchMedia("(prefers-reduced-motion: reduce)");
+let reduce = reduceMQ.matches;
+const stage = document.getElementById("stage");
+const traces = document.getElementById("traces");
+const ctx = traces.getContext("2d", { alpha: true });
+const nudge = document.getElementById("veilNudge");
+const disp = document.getElementById("veilDisp");
+const rims = document.getElementById("rims");
+const pulseH = document.getElementById("pulseH");
+const pulseV = document.getElementById("pulseV");
+const pulseC = document.getElementById("pulseC");
+const pulse = document.getElementById("pulse");
+
+const ellipses = ["tlA","tlB","trA","trB","blA","blB","brA","brB"].map((id) => document.getElementById(id));
+
+const rimNodes = CONTOURS.map(() => {
+  const halo = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  const core = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  const fringe = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  const sheen = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  halo.setAttribute("stroke", "rgba(186,246,255,0.55)");
+  halo.setAttribute("stroke-width", "14");
+  core.setAttribute("stroke", "rgba(244,255,253,0.92)");
+  core.setAttribute("stroke-width", "1.7");
+  fringe.setAttribute("stroke", "rgba(120,214,255,0.8)");
+  fringe.setAttribute("stroke-width", "1.4");
+  sheen.setAttribute("stroke", "#f4fffd");
+  sheen.setAttribute("stroke-width", "3.2");
+  sheen.setAttribute("pathLength", "100");
+  sheen.setAttribute("stroke-dasharray", "11 89");
+  sheen.setAttribute("filter", "url(#sheenGlow)");
+  rims.append(halo, fringe, core, sheen);
+  return { halo, core, fringe, sheen };
+});
+
+function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+function smooth(a, b, x) {
+  const t = clamp01((x - a) / (b - a));
+  return t * t * (3 - 2 * t);
+}
+function bump(t, a, rise, fall, b) {
+  if (t <= a || t >= b) return 0;
+  if (t < rise) return smooth(a, rise, t);
+  if (t > fall) return 1 - smooth(fall, b, t);
+  return 1;
+}
+function fmt(p) { return p[0].toFixed(1) + " " + p[1].toFixed(1); }
+function smoothD(pts) {
+  let d = "M " + fmt(pts[0]);
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[Math.min(pts.length - 1, i + 2)];
+    if (Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) > 96) {
+      d += " L " + fmt(p2);
+      continue;
+    }
+    const c1x = p1[0] + (p2[0] - p0[0]) / 6;
+    const c1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const c2x = p2[0] - (p3[0] - p1[0]) / 6;
+    const c2y = p2[1] - (p3[1] - p1[1]) / 6;
+    d += " C " + c1x.toFixed(1) + " " + c1y.toFixed(1) + ", " + c2x.toFixed(1) + " " + c2y.toFixed(1) + ", " + fmt(p2);
+  }
+  return d;
+}
+function deform(contour, t, amp, phase) {
+  const u = (t / LOOP) * TAU;
+  return contour.pts.map((p, i) => {
+    const n = contour.n[i];
+    const w = Math.sin(u + phase + i * 0.55) * 0.7 + Math.sin(u * 2 + phase * 1.3 + i * 0.22) * 0.3;
+    return [p[0] + n[0] * amp * w, p[1] + n[1] * amp * w];
+  });
+}
+function along(pts, u) {
+  const segs = [];
+  let total = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const len = Math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]);
+    segs.push(len);
+    total += len;
+  }
+  let dist = ((u % 1) + 1) % 1 * total;
+  for (let i = 0; i < segs.length; i++) {
+    if (dist <= segs[i] || i === segs.length - 1) {
+      const f = segs[i] ? dist / segs[i] : 0;
+      const a = pts[i], b = pts[i + 1];
+      return {
+        x: a[0] + (b[0] - a[0]) * f,
+        y: a[1] + (b[1] - a[1]) * f,
+        tx: (b[0] - a[0]) / (segs[i] || 1),
+        ty: (b[1] - a[1]) / (segs[i] || 1)
+      };
+    }
+    dist -= segs[i];
+  }
+  return { x: pts[0][0], y: pts[0][1], tx: 1, ty: 0 };
+}
+
+const grain = document.getElementById("grain");
+{
+  const g = grain.getContext("2d");
+  const img = g.createImageData(grain.width, grain.height);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const n = 170 + Math.random() * 85;
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = n;
+    img.data[i + 3] = Math.random() * 36;
+  }
+  g.putImageData(img, 0, 0);
+}
+
+let mask = null;
+const maskImg = new Image();
+maskImg.src = "public/mask-color.png";
+maskImg.onload = () => {
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const g = c.getContext("2d");
+  g.drawImage(maskImg, 0, 0, W, H);
+  mask = g.getImageData(0, 0, W, H).data;
+};
+function inColor(x, y) {
+  if (!mask) return true;
+  const xi = Math.max(0, Math.min(W - 1, x | 0));
+  const yi = Math.max(0, Math.min(H - 1, y | 0));
+  return mask[(yi * W + xi) * 4 + 3] > 48;
+}
+
+function resize() {
+  const r = Math.min(window.devicePixelRatio || 1, 2);
+  const w = stage.clientWidth;
+  const h = stage.clientHeight;
+  if (w < 2 || h < 2) return;
+  const bw = Math.round(w * r);
+  const bh = Math.round(h * r);
+  if (traces.width !== bw || traces.height !== bh) {
+    traces.width = bw;
+    traces.height = bh;
+  }
+  ctx.setTransform(bw / W, 0, 0, bh / H, 0, 0);
+}
+addEventListener("resize", resize);
+resize();
+
+function place(el, cx, cy, rx, ry) {
+  el.setAttribute("cx", cx.toFixed(1));
+  el.setAttribute("cy", cy.toFixed(1));
+  el.setAttribute("rx", rx.toFixed(1));
+  el.setAttribute("ry", ry.toFixed(1));
+}
+
+function field(x, y, t) {
+  const u = (t / LOOP) * TAU;
+  const ang = Math.atan2(y - CY, x - CX);
+  let vx = Math.cos(ang + Math.PI / 2) * 0.62;
+  let vy = Math.sin(ang + Math.PI / 2) * 0.62;
+  vx += Math.cos(x * 0.01 + u + y * 0.003) * 0.48;
+  vy += Math.sin(y * 0.008 - u * 1.4) * 0.48;
+  if (x < CX && y < CY) { vx += 0.22; vy += 0.08; }
+  else if (x >= CX && y < CY) { vx += 0.26; vy -= 0.14; }
+  else if (x < CX) { vx -= 0.2; vy += 0.2; }
+  else { vx += 0.06; vy += 0.28; }
+  return { x: vx, y: vy };
+}
+
+const streamSeeds = [
+  [120, 160], [230, 300], [300, 120],
+  [620, 120], [700, 260], [540, 180],
+  [120, 860], [200, 980], [280, 760],
+  [560, 800], [680, 940], [500, 700]
+];
+
+function drawBand(x, y, len, thick, rot, alpha) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  const g = ctx.createLinearGradient(-thick / 2, 0, thick / 2, 0);
+  g.addColorStop(0, "rgba(255,255,255,0)");
+  g.addColorStop(0.5, "rgba(214,238,255,0.9)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = g;
+  ctx.fillRect(-thick / 2, -len / 2, thick, len);
+  ctx.restore();
+}
+
+let forced = null;
+let raf = 0;
+let origin = performance.now();
+
+function apply(t) {
+  const u = (t / LOOP) * TAU;
+  const pulseEnv = bump(t, 0.0, 0.45, 1.15, 2.35);
+  const reach = bump(t, 0.08, 1.15, 1.55, 2.55);
+  const green = bump(t, 1.55, 2.7, 4.35, 5.65);
+  const blue = bump(t, 2.05, 3.15, 4.85, 6.15);
+  const tracesEnv = bump(t, 4.15, 5.45, 7.25, 8.75);
+  const gather = bump(t, 4.7, 5.65, 6.45, 7.25);
+  const release = bump(t, 6.15, 7.05, 7.9, 8.95);
+
+  const motions = motionsAt(t);
+  motions.forEach((m, i) => {
+    bgPlates[i].style.transform = m.css;
+    txPlates[i].style.transform = m.css;
+  });
+
+  nudge.setAttribute("dx", (Math.sin(u) * 46).toFixed(2));
+  nudge.setAttribute("dy", (Math.sin(u * 2 + 0.6) * 32).toFixed(2));
+  disp.setAttribute("scale", (26 + 20 * Math.sin(u + 0.4) ** 2 + 24 * Math.max(green, tracesEnv)).toFixed(2));
+
+  const sTL = 1 + 0.055 * Math.sin(u + 0.2);
+  const sTR = 1 + 0.06 * Math.sin(u + 1.5) + 0.14 * green;
+  const sBL = 1 + 0.065 * Math.sin(u + 2.4) + 0.12 * green;
+  const sBR = 1 + 0.05 * Math.sin(u + 3.3);
+  const lights = [
+    warpWith(198 + Math.sin(u) * 62, 276 + Math.cos(u * 2 + 0.4) * 46, motions[0]),
+    warpWith(262 + Math.cos(u * 2 + 1) * 74, 214 + Math.sin(u + 0.7) * 52, motions[0]),
+    warpWith(604 + Math.sin(u + 1.8) * 58, 226 + Math.cos(u + 2.1) * 44, motions[1]),
+    warpWith(548 + Math.cos(u * 2 + 0.4) * 66, 312 + Math.sin(u + 1.2) * 48, motions[1]),
+    warpWith(186 + Math.sin(u + 2.6) * 54, 868 + Math.cos(u + 0.5) * 46, motions[2]),
+    warpWith(258 + Math.cos(u * 2 + 2) * 62, 790 + Math.sin(u + 2.8) * 50, motions[2]),
+    warpWith(596 + Math.sin(u + 3.5) * 60, 858 + Math.cos(u * 2 + 1.1) * 48, motions[3]),
+    warpWith(518 + Math.cos(u + 4) * 70, 930 + Math.sin(u * 2 + 0.2) * 44, motions[3])
+  ];
+  const lightScale = [sTL, sTL, sTR, sTR, sBL, sBL, sBR, sBR];
+  const lightSize = [[250, 312], [128, 158], [236, 286], [118, 146], [238, 292], [116, 148], [248, 304], [126, 156]];
+  lights.forEach((p, i) => {
+    const qi = i < 2 ? 0 : i < 4 ? 1 : i < 6 ? 2 : 3;
+    place(ellipses[i], p[0], p[1], lightSize[i][0] * lightScale[i] * motions[qi].scale, lightSize[i][1] * lightScale[i] * motions[qi].scale);
+  });
+  ellipses[0].setAttribute("opacity", (0.55 + 0.2 * blue).toFixed(3));
+  ellipses[1].setAttribute("opacity", (0.4 + 0.28 * blue).toFixed(3));
+  ellipses[2].setAttribute("opacity", (0.5 + 0.28 * green).toFixed(3));
+  ellipses[3].setAttribute("opacity", (0.38 + 0.22 * green).toFixed(3));
+  ellipses[4].setAttribute("opacity", (0.48 + 0.26 * green).toFixed(3));
+  ellipses[5].setAttribute("opacity", (0.36 + 0.2 * green).toFixed(3));
+  ellipses[6].setAttribute("opacity", (0.52 + 0.22 * blue).toFixed(3));
+  ellipses[7].setAttribute("opacity", (0.4 + 0.24 * blue).toFixed(3));
+
+  const rimAmp = [16, 13, 13, 18];
+  const rimPhase = [0.2, 1.7, 3.1, 4.4];
+  const rimQuad = [2, 3, 0, 1];
+  CONTOURS.forEach((contour, i) => {
+    const extra = (i === 0 || i === 3) ? 20 * green : 14 * blue;
+    const pts = deform(contour, t, rimAmp[i] + extra + 8 * tracesEnv, rimPhase[i]).map((p) => warpWith(p[0], p[1], motions[rimQuad[i]]));
+    const d = smoothD(pts);
+    const fringe = pts.map((p, k) => [p[0] + contour.n[k][0] * 5, p[1] + contour.n[k][1] * 5]);
+    const node = rimNodes[i];
+    node.halo.setAttribute("d", d);
+    node.core.setAttribute("d", d);
+    node.fringe.setAttribute("d", smoothD(fringe));
+    node.sheen.setAttribute("d", d);
+    const travel = ((t / LOOP) * (i % 2 ? 1 : 2) + i * 0.17) % 1;
+    node.sheen.setAttribute("stroke-dashoffset", (-travel * 100).toFixed(2));
+    const energy = 0.42 + 0.58 * tracesEnv;
+    node.halo.setAttribute("opacity", (0.34 + 0.5 * energy).toFixed(3));
+    node.core.setAttribute("opacity", (0.5 + 0.5 * energy).toFixed(3));
+    node.fringe.setAttribute("opacity", (0.32 + 0.55 * energy).toFixed(3));
+    node.sheen.setAttribute("opacity", (0.15 + 0.85 * tracesEnv).toFixed(3));
+  });
+
+  const span = 24 + reach * 390;
+  const pulseL = warpWith(CX - span, CY, motions[0]);
+  const pulseR = warpWith(CX + span, CY, motions[1]);
+  const pulseT = warpWith(CX, CY - span * 1.32, motions[0]);
+  const pulseB = warpWith(CX, CY + span * 1.32, motions[2]);
+  pulseH.setAttribute("x1", pulseL[0].toFixed(1));
+  pulseH.setAttribute("y1", pulseL[1].toFixed(1));
+  pulseH.setAttribute("x2", pulseR[0].toFixed(1));
+  pulseH.setAttribute("y2", pulseR[1].toFixed(1));
+  pulseV.setAttribute("x1", pulseT[0].toFixed(1));
+  pulseV.setAttribute("y1", pulseT[1].toFixed(1));
+  pulseV.setAttribute("x2", pulseB[0].toFixed(1));
+  pulseV.setAttribute("y2", pulseB[1].toFixed(1));
+  pulse.setAttribute("opacity", (pulseEnv * 0.72).toFixed(3));
+  pulseC.setAttribute("r", (12 + pulseEnv * 86).toFixed(1));
+  pulseC.setAttribute("opacity", (pulseEnv * 0.8).toFixed(3));
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.lineCap = "round";
+  const rects = [[0, 0, CX, CY], [CX, 0, W - CX, CY], [0, CY, CX, H - CY], [CX, CY, W - CX, H - CY]];
+  const fans = [-2.2, -0.15, 1.05, 2.5];
+  const moteAlpha = 0.22 + 0.78 * tracesEnv;
+  motions.forEach((m, qi) => {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(rects[qi][0], rects[qi][1], rects[qi][2], rects[qi][3]);
+    ctx.clip();
+    ctx.translate(CX, CY);
+    ctx.translate(m.tx * W, m.ty * H);
+    ctx.rotate(m.rot);
+    ctx.scale(m.scale, m.scale);
+    ctx.translate(-CX, -CY);
+    ctx.globalCompositeOperation = "source-over";
+
+    if (qi === 0) drawBand(150 + Math.sin(u + 0.5) * 110, 250 + Math.cos(u) * 48, 520, 92, -0.55, 0.1 + 0.5 * blue);
+    if (qi === 3) drawBand(600 + Math.sin(u + 2.2) * 100, 860, 540, 88, 0.62, 0.1 + 0.48 * blue);
+
+    FIELDS.forEach((curve, i) => {
+      const home = i < 2 ? 0 : i < 4 ? 1 : i < 6 ? 2 : 3;
+      if (home !== qi) return;
+      const moved = curve.map((p, k) => [
+        p[0] + Math.sin(u + i + k * 0.6) * 28,
+        p[1] + Math.cos(u * 2 + i * 0.7 + k) * 22
+      ]);
+      ctx.beginPath();
+      ctx.moveTo(moved[0][0], moved[0][1]);
+      for (let k = 1; k < moved.length; k++) ctx.lineTo(moved[k][0], moved[k][1]);
+      ctx.strokeStyle = i % 2 ? "rgba(255,255,255,0.8)" : "rgba(176,236,255,0.95)";
+      ctx.globalAlpha = 0.1 + 0.5 * tracesEnv;
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      for (let k = 0; k < 3; k++) {
+        const uo = (t / LOOP) * (0.5 + (i % 3) * 0.25) + k / 3 + i * 0.05;
+        const p = along(curve, uo);
+        const fade = Math.sin(((uo % 1) + 1) % 1 * Math.PI);
+        ctx.globalAlpha = moteAlpha * fade * 0.7;
+        ctx.fillStyle = "#e9fffb";
+        ctx.beginPath();
+        ctx.arc(p.x + Math.sin(u + k) * 10, p.y, 1.8, 0, TAU);
+        ctx.fill();
+      }
+    });
+
+    streamSeeds.forEach((seed, i) => {
+      const home = seed[0] < CX ? (seed[1] < CY ? 0 : 2) : (seed[1] < CY ? 1 : 3);
+      if (home !== qi) return;
+      let x = seed[0] + Math.sin(u + i) * 18;
+      let y = seed[1] + Math.cos(u * 2 + i * 0.8) * 16;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      for (let s = 0; s < 14; s++) {
+        const v = field(x, y, t);
+        x += v.x * 10;
+        y += v.y * 10;
+        ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = "rgba(210,255,250,0.9)";
+      ctx.globalAlpha = 0.1 + 0.46 * tracesEnv;
+      ctx.lineWidth = 1.25;
+      ctx.stroke();
+    });
+
+    CONTOURS.forEach((contour, i) => {
+      if (rimQuad[i] !== qi) return;
+      for (let k = 0; k < 7; k++) {
+        const speed = i % 2 ? 1 : 0.5;
+        const uo = (t / LOOP) * speed + i * 0.13 + k / 7;
+        const p = along(contour.pts, uo);
+        const fade = Math.sin(((uo % 1) + 1) % 1 * Math.PI);
+        ctx.globalAlpha = moteAlpha * fade;
+        ctx.strokeStyle = k % 3 === 0 ? "#ffffff" : "#b7f4ff";
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x - p.tx * 28, p.y - p.ty * 28);
+        ctx.stroke();
+      }
+    });
+
+    const base = fans[qi];
+    for (let k = 0; k < 6; k++) {
+      const phase = k * 0.17 + qi * 0.4;
+      const ang = base + (k - 2.5) * 0.12 + Math.sin(u + phase) * 0.1;
+      const ambient = 90 + 48 * Math.sin(u + phase);
+      const dist = ambient * (1 - 0.84 * gather) + 190 * release;
+      const x = CX + Math.cos(ang) * dist;
+      const y = CY + Math.sin(ang) * dist * 1.15;
+      ctx.globalAlpha = 0.16 + 0.84 * Math.max(gather, release, tracesEnv * 0.5);
+      ctx.fillStyle = "#f3fffd";
+      ctx.beginPath();
+      ctx.arc(x, y, 2.1, 0, TAU);
+      ctx.fill();
+      ctx.strokeStyle = "#d7fff8";
+      ctx.lineWidth = 1.3;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - Math.cos(ang) * 18, y - Math.sin(ang) * 18);
+      ctx.stroke();
+    }
+    ctx.restore();
+  });
+  ctx.globalCompositeOperation = "source-over";
+  ctx.globalAlpha = 1;
+}
+
+function frame(now) {
+  if (!reduce) apply(forced == null ? ((now - origin) % (LOOP * 1000)) / 1000 : forced);
+  raf = requestAnimationFrame(frame);
+}
+function start() {
+  if (reduce) return;
+  cancelAnimationFrame(raf);
+  origin = performance.now();
+  raf = requestAnimationFrame(frame);
+}
+start();
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) cancelAnimationFrame(raf);
+  else start();
+});
+reduceMQ.addEventListener("change", () => {
+  reduce = reduceMQ.matches;
+  if (reduce) {
+    cancelAnimationFrame(raf);
+    document.querySelectorAll(".plate").forEach((el) => { el.style.transform = "none"; });
+  } else start();
+});
+
+window.__poster = {
+  seek(t) { forced = Math.max(0, Math.min(LOOP, t)); apply(forced); },
+  play() { forced = null; origin = performance.now(); }
+};
+
+const fsBtn = document.getElementById("fs");
+function syncFsIcon() {
+  const open = !!document.fullscreenElement;
+  fsBtn.setAttribute("aria-label", open ? "退出全屏" : "全屏显示");
+  fsBtn.querySelector("path").setAttribute("d", open
+    ? "M6 2v4H2M10 2v4h4M14 10h-4v4M2 10h4v4"
+    : "M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4");
+}
+fsBtn.addEventListener("click", () => {
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+  else document.exitFullscreen?.();
+});
+stage.addEventListener("dblclick", () => fsBtn.click());
+addEventListener("keydown", (e) => {
+  if (e.key === "f" || e.key === "F") fsBtn.click();
+});
+document.addEventListener("fullscreenchange", syncFsIcon);
+</script>
+</body>
+</html>
